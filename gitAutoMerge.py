@@ -24,7 +24,7 @@ _merge_branch = _code_branch = _working_branch = _gerrit_server = ''
 #_merge_branch = 'ZON/dev/EXTERNAL/MT6761/r0mp1V6.7.1/PFAR' # current developing branch
 #_code_branch = 'ZON/dev/EXTERNAL/MT6761/r0mp1V8.46/PFAR' # new developing branch
 #_merge_branch = 'ZON/dev/MT6761/r0mp1V6.7.1/PFAR'
-#_code_branch = 'ZON/dev/MT6761/r0mp1V8.46/PFAR'
+_code_branch = 'OG6/dev/SM6125/202000271/PFAS'
 
 _project = ''
 _remote_info = {}
