@@ -1,416 +1,361 @@
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
-
-import sys, re, os, time, getopt, subprocess
-import xml.etree.ElementTree as ET
+# 2021/11/23@Tony
+import argparse
+import json
+import os
+import platform
+import re
+import time
+import xml.etree.ElementTree as ElementTree
 
 # some information no need to change every time
-TOOL_VERSION = '3.1'
-ACCOUNT = 'TonyCYLin'
-EMAIL = ACCOUNT + '@fih-foxconn.com'
-ANDROID_VER = 'PFAR' # pattern for finding merge branch. upstream="[project]/.../[ANDROID_VER]"
+__tool_version__ = "3.2"
+__account__ = "TonyCYLin"
+__email__ = f"{__account__}@fih-foxconn.com"
+__git_auto_merge_last_settings__ = ".gitAutoMergeSettings"
 
-# global const variable
-PRJ_NAME = 0
-PRJ_REV = 1
-PRJ_UPSTREAM = 2
-PRJ_PATH = 3
-PRJ_REMOTE = 4
-TAB = '  '
+from json import JSONDecodeError
+from subprocess import Popen, PIPE, STDOUT
 
-# global variable
-_merge_branch = _code_branch = _working_branch = _gerrit_server = ''
-#_gerrit_server = 'gerrit3.fihtdc.com'
-#_merge_branch = 'ZON/dev/EXTERNAL/MT6761/r0mp1V6.7.1/PFAR' # current developing branch
-#_code_branch = 'ZON/dev/EXTERNAL/MT6761/r0mp1V8.46/PFAR' # new developing branch
-#_merge_branch = 'ZON/dev/MT6761/r0mp1V6.7.1/PFAR'
-_code_branch = 'OG6/dev/SM6125/202000271/PFAS'
 
-_project = ''
-_remote_info = {}
-_default_remote = ''
+class Utils:
+    tab = "    "
 
-_working_path = os.getcwd()
-all_log = open(os.path.join(_working_path, 'merge_' + time.strftime('%Y%m%d') + '.log'), 'a')
-conflict_log = open(os.path.join(_working_path, 'conflict_' + time.strftime('%Y%m%d') + '.log'), 'a')
-_file_loc = ''
+    def __init__(self, root):
+        self.root = root
 
-def show_usage():
-    print ('Usage:');
-    print ('       1. repo sync new version code base')
-    print ('       2. Copy daily build manifest XML to the root folder of code')
-    print ('       3. Copy gitAutoMerge.py to the root folder of code')
-    print ('       4. Merge code: python3 gitAutoMerge.py daily.xml (ex.20200222_OG6_Q_2000037_Daily.xml)')
-    print ('       5. Fix conflict by check conflict*.log, and commit git project after conflict fixed')
-    print ('       7. Push code: python3 gitAutoMerge.py -p daily.xml')
-    print ('------------------------------------------------------------------')
-    print ('Command: gitAutoMerge [-p|-m|-c|-k file|-t file] yyyymmdd_prj_v_revision_Daily.xml')
-    print ('       -m, --merge              : merge git projects')
-    print ('       -p, --push               : push merged git projects')
-    print ('       -c, --check              : check merge state')
-    print ('       -k, --chery-pick [file]  : chery pick from file')
-    print ('                                  file format: Git_Project Commit_ID');
-    print ('                                  ex: platform/packages/apps/Settings 848b19087804e99282af5693a6a7f95809108993');
-    print ('       -t, --muti-push [file]   : push git project from file')
-    print ('                                  file format: Git_Project Commit_ID');
-    print ('------------------------------------------------------------------')
-    print ('    (yyyymmdd_prj_v_revision_Daily.xml, will get project code from filename by this format)')
+    @staticmethod
+    def choice(title, options):
+        options.sort()
+        if not options:
+            raise BaseException("no options")
+        elif len(options) == 1:
+            return options[0]
+        for i, option in enumerate(options):
+            print(f"{i}: {option}")
+        while True:
+            val = input(f"{title} is ? ")
+            if 0 <= int(val) < len(options):
+                return options[int(val)]
 
-def show_info(operation, xml_file, cherry_pick_file):
-    localtime = time.asctime(time.localtime(time.time()) )
-    print ('******************integration info****************** ver.' + TOOL_VERSION + ", " + localtime)
-    print ('Merge from         : ' + _merge_branch + ' at ' + xml_file)
-    print ('Merge into         : ' + _code_branch)
-    print ('Working branch     : ' + _working_branch)
-    print ('Account            : ' + ACCOUNT)
-    print ('GerritServer       : ' + _gerrit_server)
-    print ('Operation          : ' + operation)
-    if cherry_pick_file:
-        print ('Cherry Pick        : ' + cherry_pick_file)
-    print ('********************************************************')
-    print ('rember commit each git project after conflict fixed')
-    log('-------------------------------------- ' + localtime + ' --------------------------------------')
+    # merge.log and conflict.log
+    def log(self, txt, merge_mode=True, color=False):
+        name = "merge" if merge_mode else "conflict"
+        output = os.path.join(self.root, name + "_" + time.strftime('%Y%m%d') + ".log")
+        lines = txt.split("\n") if type(txt) == str else txt
+        with open(output, "a") as f:
+            for line in lines:                
+                f.write(line + "\n")
+                line = "\033[7m" + line + "\033[0m"if color else line
+                print(line) if merge_mode else None
+    
+    @staticmethod
+    def run(cmd):
+        process = Popen(cmd, stdout=PIPE, stdin=PIPE, stderr=PIPE, shell=True)
+        process.wait()
+        result = [s.decode('utf-8') for s in process.stdout.readlines() + process.stderr.readlines()]
+        result = [s.strip() for s in result]
+        return result
 
-def push_prj(prjs):
-    for prj in prjs:
-        is_good = True
-        has_change = False
-        no_need_push = False
-        path = os.path.join(_working_path, prj[PRJ_PATH])
-        tag = '[' + str(prjs.index(prj) + 1) + '/' + str(len(prjs)) + '] ' + prj[PRJ_NAME] + ', ' + prj[PRJ_PATH]
-        if os.path.isdir(path):
-            log('\n---> push: ' + tag)
-            os.chdir(path)
-            result = doCmd('git status')
-            log('\t---')
-            if not 'working tree clean' in result: is_good = False
-            if 'Your branch is up to date' in result:
-                no_need_push = True
-            else:
-                cmd = 'git push ssh://' + ACCOUNT + '@' + _gerrit_server + ':29418/' + _remote_info[prj[PRJ_REMOTE]] + '/'
-                cmd += prj[PRJ_NAME] + ' HEAD:refs/for/' + _code_branch
-                result = doCmd(cmd)
-                if not 'no new changes' in result: has_change = True
+    def do(self, cmd):
+        self.log(self.tab + cmd)
+        result = Utils.run(cmd)
+        result = [self.tab * 2 + s for s in result]
+        self.log(result)
+        return result
+
+    @staticmethod
+    def contain(key, line):
+        lines = [line] if type(line) == str else line
+        for line in lines:
+            if line.find(key) > 0:
+                return True
+        return False
+
+    @staticmethod
+    def ok(result):
+        # key pattern in error message
+        err_msg = [
+            "did not match any file(s) known to git",
+            "you need to resolve your current index first",
+            "error: remote did not send all necessary objects",
+            "local changes to the following files would be overwritten by merge",
+            "Automatic merge failed",
+            "not something we can merge",
+            "failed to push some refs"
+        ]
+        return len([err for err in err_msg if Utils.contain(err, result)]) == 0
+
+
+class Project:
+    def __init__(self, name, rev, up, path, remote):
+        self.name = name
+        self.rev = rev
+        self.up = up
+        self.path = path
+        self.remote = remote
+
+
+class Manifest:
+    def read_settings(self):
+        settings = {"xml": None, "merge": list(), "code": list()}
+        if os.path.isfile(__git_auto_merge_last_settings__):
+            with open(__git_auto_merge_last_settings__, "r") as f:
+                settings = json.load(f) if f else None
+        self.xml = settings["xml"]
+        self.merge = settings["merge"]
+        self.code = settings["code"]
+
+    def __init__(self):
+        self.read_settings()
+        self.working = os.getcwd()
+        candidates = [d for d in os.listdir(".") if os.path.isfile(os.path.join(".", d)) and d.endswith("Daily.xml")]
+        if not candidates:
+            return
+        self.xml = self.xml if self.xml else Utils.choice("manifest file", candidates)
+        print(self.xml)
+        # ex: 20211112_OG6_S_202000231_Daily.xml -> OG6
+        self.prj = self.xml[9:12] if self.xml.endswith("Daily.xml") else None
+        self.work = "rel/ORI/" + self.xml[:-4]
+
+        # try to find merge branch from daily build xml
+        root = ElementTree.parse(self.xml).getroot()
+
+        not_set = len(self.merge) <= 0
+        while not_set:
+            ups = [child.attrib.get('upstream') for child in root.findall('project') + root.findall('reset-project')]
+            ups = [i for i in list(set(ups)) if i.endswith("PFAS") or i.endswith("PFAR") or i.endswith("BSP")]
+            ups = [i for i in ups if i not in self.merge]
+            self.merge += [Utils.choice("merge branch", list(set(ups)))]
+            # get information from .repo
+            self.code += [self.get_new_branch()]
+            if "Y" != input(f"have another branch need to merge? (y/N)").upper():
+                not_set = False
+
+        # which project need merge ?
+        self.remote, self.default_remote, self.server = self.get_remote(root)
+        self.proj_lst = self.get_proj(root)
+
+        # find source file location, /media/Workspace/tony/zon846 -> file://10.57.61.113/Workspace/tony/zon846
+        if "Linux" == platform.system():
+            p = Popen('hostname -I', shell=True, stdout=PIPE, stderr=STDOUT)
+            ip = p.stdout.readline().strip().decode('utf-8')
+            self.file = 'file://' + ip + '/' + "/".join(os.getcwd().split("/")[3:])
+
+        self.check_info()
+
+    def check_info(self):
+        msg = "xml,prj,work,remote,default_remote,server,proj list"
+        lost = [i for i, o in enumerate([self.xml, self.prj, self.work, self.remote,
+                                         self.default_remote, self.server, self.proj_lst]) if not o]
+        lost += [i for i, o in enumerate([self.merge, self.code], len(msg)) if len(o) <= 0]
+        msg += ",merge, code"
+        if lost:
+            info = ','.join([msg.split(",")[i] for i in lost])
+            raise BaseException(info)
         else:
-            is_good = False
-            log(TAB + '[ERROR]: ' + prj[PRJ_PATH] + ' not exist')
-        if not is_good: tag = 'ERROR ' + tag
-        if has_change: tag = 'CHANGE ' + tag
-        if no_need_push: tag = 'NO_PUSH ' + tag
-        log('<--- push: ' + tag)
+            with open(__git_auto_merge_last_settings__, "w") as f:
+                json.dump({"xml": self.xml, "merge": self.merge, "code": self.code}, f)
 
-def merge_prj(prjs):
-    for prj in prjs:
-        path = os.path.join(_working_path, prj[PRJ_PATH])
-        tag = '[' + str(prjs.index(prj) + 1) + '/' + str(len(prjs)) + '] ' + prj[PRJ_NAME] + ', ' + prj[PRJ_PATH] + ', ' + prj[PRJ_REV]
-        is_good = True
-        log('\n---> merge: ' + tag)
-        if os.path.isdir(path):
-            os.chdir(path)
+    @staticmethod
+    def get_remote(root):
+        remote = dict()
+        default = root.find('default').attrib.get('remote')
+        for name, fetch, review in [[child.attrib.get('name'), child.attrib.get('fetch'),  child.attrib.get('review')]
+                                    for child in root.findall('remote')]:
+            # "." -> "QC", remove "../"
+            fetch = "QC" if fetch == '.' else fetch[3:] if fetch.startswith('../') else fetch
+            remote[name] = fetch
+            # http://gerrit3.fihtdc.com/ --> gerrit3.fihtdc.com
+            if name == default:
+                server = review[7:-1]
+        return remote, default, server
 
-            # whether code_branch contain this patch
-            result = doCmd('git checkout ' + _code_branch)
-            if 'did not match any file(s) known to git' in result:
-                log('<--- merge: ERROR ' + _code_branch + ' not exist. ' + tag)
-                continue
-
-            # whether code_branch contain unmerged file
-            if 'you need to resolve your current index first' in result:
-                log('<--- merge: ' + '[ERROR]: ' + _code_branch + ' need to resolve conflict file first. ' + tag)
-                continue
-
-            result = doCmd('git branch --contains ' + prj[PRJ_REV])
-
-            if _code_branch not in result:
-                doCmd('git config user.name ' + ACCOUNT + ' && git config user.email ' + EMAIL)
-
-                result = doCmd('git fetch ' + prj[PRJ_REMOTE] + ' --unshallow')
-                # try again when git fetch failure
-                if 'error: remote did not send all necessary objects' in result:
-                    doCmd('git fetch ' + prj[PRJ_REMOTE] + ' --unshallow')
-                doCmd('git fetch ' + prj[PRJ_REMOTE] )
-
-                log(TAB + TAB + '----------')
-                doCmd('git branch ' + _working_branch + ' ' + prj[PRJ_REV])
-                log(TAB + TAB + '----------')
-                doCmd('git branch -v')
-                log(TAB + TAB + '----------')
-                is_good = doMerge(prj)
-            else:
-                log(TAB + prj[PRJ_REV] + ' already in ' + _code_branch + '\n' + TAB + '###### no need to merge ######')
-            if not is_good: tag = 'CONFLICT ' + tag
-            log('<--- merge: ' + tag)
-        else:
-            log('<--- merge: ' + 'ERROR: folder not exist (' + prj[PRJ_PATH] + ')' + tag)
-
-def check_prj(prjs):
-    for prj in prjs:
-        path = os.path.join(_working_path, prj[PRJ_PATH])
-        tag = '[' + str(prjs.index(prj) + 1) + '/' + str(len(prjs)) + '] ' + prj[PRJ_NAME] + ', ' + prj[PRJ_PATH] + ', ' + prj[PRJ_REV]
-        log('\n---> check: ' + tag)
-        if os.path.isdir(path):
-            os.chdir(path)
-
-            # whether code_branch contain this patch
-            result = doCmd('git checkout ' + _code_branch)
-            if 'did not match any file(s) known to git' in result:
-                log(TAB + '[ERROR]: ' + _code_branch + ' not exist')
-                log('<--- check: ' + tag)
-                continue
-
-            # whether code_branch contain unmerged file
-            if 'you need to resolve your current index first' in result:
-                log(TAB + '[ERROR]: ' + _code_branch + ' need to resolve conflict file first')
-                log('<--- check: ' + tag)
-                continue
-
-            result = doCmd('git branch --contains ' + prj[PRJ_REV])
-
-            if _code_branch not in result:
-                log(TAB + prj[PRJ_REV] + ' not in ' + _code_branch + '\n' + TAB + '$$$$$$ need to merge $$$$$$')
-            else:
-                log(TAB + prj[PRJ_REV] + ' already in ' + _code_branch + '\n' + TAB + '###### no need to merge ######')
-        else:
-            log(TAB + '[ERROR]: folder not exist (' + prj[PRJ_PATH] + ')')
-        log('<--- check: ' + tag)
-
-def cherry_pick(prjs, cherry_pick_file):
-    f = open(cherry_pick_file, 'r')
-    lines = f.readlines()
-    lines.reverse()
-
-    for line in lines:
-        tag = '[' + str(lines.index(line) + 1) + '/' + str(len(lines)) + '] ' + line.split()[0] + ', ' + line.split()[1]
-        log('\n---> cherry-pick: ' + tag)
-        found = False
-        for prj in prjs:
-            if line.split()[0] in prj[PRJ_NAME]:
-                found = True
-                path = os.path.join(_working_path, prj[PRJ_PATH])
-                if os.path.isdir(path):
-                    os.chdir(path)
-                    doCmd('git checkout ' + _code_branch)
-                    doCmd('git config user.name ' + ACCOUNT + ' && git config user.email ' + EMAIL)
-                    doCmd('git fetch ' + prj[PRJ_REMOTE])
-                    log(TAB + TAB + '----------')
-                    doCmd('git cherry-pick ' + line.split()[1])
-                    doCmd('git branch -v')
-                else:
-                    log(TAB + '[ERROR]: folder not exist (' + path + ')')
-        if not found:
-            log(TAB + '[Error] Can not find ' + line.split()[0] + ' at target projects ###')
-        log('<--- cherry-pick: ' + tag)
-
-def multi_push(prjs, cherry_pick_file):
-    f = open(cherry_pick_file, 'r')
-    lines = f.readlines()
-    # remove space, new line...
-    lines = [i.strip() for i in lines]
-    # remove duplicate git project
-    lines = sorted(set(lines), key = lines.index)
-
-    for line in lines:
-        tag = '[' + str(lines.index(line) + 1) + '/' + str(len(lines)) + '] ' + line.split()[0]
-        log('\n---> multi-push: ' + tag)
-        found = False
-        for prj in prjs:
-            if line.split()[0] in prj[PRJ_NAME]:
-                found = True
-                path = os.path.join(_working_path, prj[PRJ_PATH])
-                if os.path.isdir(path):
-                    os.chdir(path)
-                    cmd = 'git push ssh://' + ACCOUNT + '@' + _gerrit_server + ':29418/' + _remote_info[prj[PRJ_REMOTE]] + '/'
-                    cmd += prj[PRJ_NAME] + ' HEAD:refs/for/' + _code_branch
-                    doCmd(cmd)
-                else:
-                    log(TAB + '[ERROR]: folder not exist (' + path + ')')
-        if not found:
-            log(TAB + '[Error] Can not find ' + line.split()[0] + ' at target projects ###')
-        log('<--- multi-push: ' + tag)
-
-# -----------------------------------------------------------------------------------
-def filter_prj(xml_file):
-    global _remote_info, _merge_branch, _default_remote
-
-    tree = ET.parse(xml_file)
-    root = tree.getroot()
-
-    # try to find merge branch from daily build xml
-    if not _merge_branch:
+    def get_proj(self, root):
+        proj = []
         for child in root.findall('project') + root.findall('reset-project'):
-            upstream = child.attrib.get('upstream')
-            if upstream.endswith(ANDROID_VER):
-                _merge_branch = upstream
-                break
-
-    if not _merge_branch:
-        print('Can not read merge branch from ' + xml_file)
-        sys.exit(2)
-
-    for child in root.findall('remote'):
-        name = child.attrib.get('name')
-        fetch = child.attrib.get('fetch')
-        if fetch == '.': fetch = 'QC'
-        elif fetch.startswith('../'): fetch = fetch[3:]
-        _remote_info[name] = fetch
-
-    projs = []
-    for child in root.findall('project') + root.findall('reset-project'):
-        get_value = lambda val, default: default if not val else val
-        name = child.attrib.get('name')
-        path = get_value(child.attrib.get('path'), name)
-        remote = get_value(child.attrib.get('remote'), _default_remote)
-        rev = child.attrib.get('revision')
-        upstream = get_value(child.attrib.get('upstream'), rev)
-        if upstream == _merge_branch: projs.append([name, rev, upstream, path, remote])
-
-    return projs
-
-def log(s):
-    all_log.write(s + '\n')
-    all_log.flush()
-    print(str(s))
-
-def doCmd(cmd):
-    log(TAB + cmd)
-    ret = ''
-    tmp_log = os.path.join(_working_path, 'tmp.log')
-    os.system(cmd + " 2>&1 | tee " + tmp_log)
-    f = open(tmp_log, 'r')
-    for line in f.readlines():
-        log(TAB + line.strip())
-        ret += TAB + line
-    return ret
-
-def generate_link(prj, line, branch):
-    l = 'http://' + _gerrit_server + ':7474/gitweb/?p='
-    l += _remote_info[prj[PRJ_REMOTE]] + '/' + prj[PRJ_NAME] + '.git' + ';'
-    l += 'f=' + line[line.find('Merge conflict') + 18:] + ';'
-    l += 'hb=refs/heads/' + branch + ';'
-    l += 'a=blame' # shortlog, blob_plain
-    return l
-
-def doMerge(prj):
-    cmd = 'git merge --no-ff ' + _working_branch
-    log(TAB + cmd)
-    c_lines = []
-    is_good = True
-
-    # output merge result to tmp.log
-    tmp_log = os.path.join(_working_path, 'tmp.log')
-    os.system(cmd + " 2>&1 | tee " + tmp_log)
-    f = open(tmp_log, 'r')
-    for line in f.readlines():
-        line = line.strip()
-        if 'Your local changes to the following files would be overwritten by merge' in line:
-            is_good = False
-            log(TAB + '[ERROR]: ' + line)
-        else:
-            log(TAB + line.strip())
-        if 'CONFLICT' in line: c_lines.append(line)
-        if 'Automatic merge failed' in line: is_good = False
-        if 'not something we can merge' in line: is_good = False
-
-    # keep conflict file list at conflict*.log
-    if c_lines:
-        conflict_log.write('--->' + prj[PRJ_NAME] + '\n')
-        for line in c_lines:
-            line = line.strip()
-            k = line.find('Merge conflict')
-            l = line[:k] + _file_loc + '/' + prj[PRJ_PATH] + '/' + line[k + 18:]
-            conflict_log.write(l + '\n')
-            conflict_log.write('\t\t\t\t\t' + generate_link(prj, line, _merge_branch) + '\n')
-        conflict_log.write('<---' + prj[PRJ_NAME] + '\n\n')
-        conflict_log.flush()
-    return is_good
-
-def collect_info(xml):
-    global _code_branch, _project, _merge_branch, _gerrit_server, _working_branch, _default_remote, _file_loc
-    merge_projects = []
-
-    # try to find project code from daily build xml, ex: 20200222_OG6_Q_2000037_Daily.xml -> OG6
-    if len(xml) > 12 and 'Daily.xml' in xml: _project = xml[9:12]
-    if not _working_branch: _working_branch = 'rel/ORI/' + xml[:-10]
-
-    root = ET.parse('.repo/manifest.xml').getroot()
-
-    _default_remote = root.find('default').attrib.get('remote')
-
-    # find gerrit server
-    if not _gerrit_server:
-        for child in root.findall('remote'):
-            if child.attrib.get('name') == _default_remote:
-                # http://gerrit3.fihtdc.com/ --> gerrit3.fihtdc.com
-                _gerrit_server = child.attrib.get('review')[7:-1]
-
-    # collect projects need to merged
-    merge_projects = filter_prj(xml)
-
-    # find the new branch
-    if not _code_branch:
-        for child in root.findall('include'):
-            if ANDROID_VER + '.xml' in child.attrib.get('name'):
-                upper_xml = child.attrib.get('name')
-                break
-        root = ET.parse('.repo/manifests/' + upper_xml).getroot()
-        for child in root.findall('reset-project'):
             rev = child.attrib.get('revision')
-            if rev.endswith(ANDROID_VER):
-                _code_branch = rev
-                break
+            up = child.attrib.get('upstream') if child.attrib.get('upstream') else rev
+            if up in self.merge:
+                name = child.attrib.get('name')
+                path = child.attrib.get('path') if child.attrib.get('path') else name
+                remote = child.attrib.get('remote') if child.attrib.get('remote') else self.default_remote
+                proj.append(Project(name, rev, up, path, remote))
+        return proj
 
-    # find source file location, /media/Workspace/tony/zon846 -> file://10.57.61.113/Workspace/tony/zon846
-    p = subprocess.Popen('hostname -I', shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    machine_ip = p.stdout.readline().strip().decode('utf-8')
-    _file_loc = 'file://' + machine_ip + '/' + os.getcwd()[os.getcwd().find('/', 1) + 1:]
+    def get_new_branch(self):
+        # find the new branch from .repo
+        root = ElementTree.parse('.repo/manifest.xml').getroot()
+        opts = [child.attrib.get('name') for child in root.findall('include')]
+        opts = [i for i in opts if i.endswith("PFAR.xml") or i.endswith("PFAS.xml")]
+        xml = Utils.choice("merge xml", opts)
+        root = ElementTree.parse('.repo/manifests/' + xml).getroot()
+        opts = list(set([child.attrib.get('revision') for child in root.findall('project') + root.findall('reset-project')]))
+        opts = [i for i in opts if i and i not in self.code]
+        return Utils.choice("revision", opts)
 
-    # project, merge_branch, code_branch must not be empty
-    if not _project or not _merge_branch or not _code_branch:
-        print('Can not find import information.')
-        print('Please check xml file name and .repo folder!')
-        sys.exit(2)
+    def get_info(self):
+        localtime = time.asctime(time.localtime(time.time()) )
+        result = f"******************integration info****************** ver. {__tool_version__} {localtime}\n"
+        for i, merge in enumerate(self.merge):
+            result += f"Merge#{i} from       :  {merge} at {self.xml}\n"
+            result += f"Merge#{i} into       :  {self.code[i]}\n"
+        result += f"Working branch     :  {self.work}\n"
+        result += f"Account            :  {__account__}\n"
+        result += f"Gerrit Server      :  {self.server}\n"
+        result += f"********************************************************\n"
+        result += f"remember commit each git project after conflict fixed"
+        return result
 
-    return merge_projects
-# --------------------------------------------------------------------------
 
-def main(argv):
-    global _working_branch, _project
-    operation = 'merge'
+class Operation:
+    def __init__(self, mani, fun, utils):
+        self.mani = mani
+        self.fun = fun
+        self.tag = None
+        self.utils = utils
+        pass
 
-    try:
-        opts, args = getopt.getopt(argv,'mpck:t:',['merge','push','check','cherry-pick=', 'multi-push'])
-    except getopt.GetoptError:
-      show_usage()
-      sys.exit(2)
+    def set_tag(self, tag):
+        self.tag = tag
 
-    cherry_pick_file = ''
-    for opt, arg in opts:
-        if opt in ('-p', '--push'): operation = 'push'
-        if opt in ('-m', '--merge'): operation = 'merge'
-        if opt in ('-c', '--check'): operation = 'check'
-        if opt in ('-k', '--cherry-pick'):
-            operation = 'cherry-pick'
-            cherry_pick_file = arg
-        if opt in ('-t', '--multi-push'):
-            operation = 'multi-push'
-            cherry_pick_file = arg
+    def gen_conflict(self, proj, result):
+        # CONFLICT(content): Merge conflict in src/com/android/bluetooth/btservice/AdapterService.java
+        #    ===>
+        # CONFLICT(content): AdapterService.java
+        #   file://10.57.61.113/Workspace/tony/og6/.../AdapterService.java
+        #   http://10.56.56.7:7474/gitweb/?p=QC_19_21/platform/fra...hb=refs/heads/SHARP/dev/QSSI/12004300/AQUOS/PFAS;a=blame
+        file_regex = re.compile(r".*Merge conflict in (.*)")
+        files = [(line.split(":")[0].strip(), file_regex.search(line).group(1)) for line in result if file_regex.search(line)]
+        self.utils.log(f"---> {self.tag}", False)
+        for head, file in files:
+            msg = f"  {head}: {os.path.basename(file)}\n"
+            msg += Utils.tab + os.path.join(self.mani.file, proj.path, file)
+            self.utils.log(msg, False)
+            msg = f"{Utils.tab}http://{self.mani.server}:7474/gitweb/?p={self.mani.remote[proj.remote]}/{proj.name}.git;"
+            msg += f"f={file};hb=refs/heads/{proj.up};a=blame"
+            self.utils.log(msg, False)
+        self.utils.log(f"<--- {self.tag}", False)
 
-    if args: xml_file = args[0]
-    if not xml_file: show_usage()
+    def exec(self, proj):
+        if self.fun == "merge":
+            return self.merge(proj)
+        if self.fun == "push":
+            return self.push(proj)
+        if self.fun == "verify":
+            return self.verify(proj)
 
-    # list git project need merge
-    target_prjs = collect_info(xml_file)
-    show_info(operation, xml_file, cherry_pick_file)
+    def merge(self, proj):
+        good = self.utils.ok(self.utils.do(f"git checkout {self.mani.code}"))
+        if good:
+            result = self.utils.do(f"git branch --contains {proj.rev}")
+            no_merge = Utils.contain(self.mani.code, result)
+            if no_merge:
+                self.utils.log(Utils.tab + '# no need to merge #')
+            else:
+                self.utils.do(f"git config user.name {__account__} && git config user.email {__email__}")
+                # try again when git fetch failure
+                if not self.utils.ok(self.utils.do(f"git fetch {proj.remote} --unshallow")):
+                    self.utils.do(f"git fetch {proj.remote} --unshallow")
+                self.utils.do(f"git branch {self.mani.work} {proj.rev}")
+                self.utils.do('git branch -v')
+                result = self.utils.do(f'git merge --no-ff {self.mani.work}')
+                good = self.utils.ok(result)
+                if not good:
+                    self.gen_conflict(proj, result)
+        status = "<ERROR>" if not good else ("<NO MERGE>" if no_merge else "")
+        return good, status
 
-    ans = input('is everythings good? (y/N)')
-    if ans.lower() == 'y':
-        if operation == 'merge': merge_prj(target_prjs)
-        elif operation == 'push': push_prj(target_prjs)
-        elif operation == 'check': check_prj(target_prjs)
-        elif operation == 'cherry-pick': cherry_pick(target_prjs, cherry_pick_file)
-        elif operation == 'multi-push': multi_push(target_prjs, cherry_pick_file)
-    else:
+    def push(self, proj):
+        result = self.utils.do("git status")
+        good = Utils.contain("working tree clean", result)
+        no_push = Utils.contain("Your branch is up to date", result)
+        no_change = False
+        if good and not no_push:
+            cmd = f"git push ssh://{__account__}@{self.mani.server}:29418/{self.mani.remote[proj.remote]}/"
+            cmd += f"{proj.name} HEAD:refs/for/{self.mani.code}"
+            result = self.utils.do(cmd)
+            no_change = Utils.contain("no new changes", result)
+            good = Utils.ok(result)
+            
+        status = "<ERROR>" if not good else ("<NO CHANGE>" if no_change or no_push else "")        
+        return good, status
+
+    def verify(self, proj):
+        result = self.utils.do(f"git branch --contains {proj.rev}")
+        good = Utils.contain(self.mani.code, result)
+        if good:
+            result = self.utils.do("git status")
+            good = Utils.contain("up to date", result)
+            good = Utils.contain("working tree clean", result) if good else good
+        status = "<ERROR>" if not good else ""
+        return good, status
+
+
+class Gerrit:
+    def __init__(self, server):
+        self.server = server
+
+    def query(self, ask):
+        cmd = f"ssh -p 29418 {self.server} -l tonycylin gerrit query --format=JSON --current-patch-set {ask}"
+        cmd += " limit:1"
+        result = Utils.run(cmd)
+        return result
+
+
+def setup(args):
+    mani = Manifest()
+    print(mani.get_info())
+    utils = Utils(mani.working)
+
+    op = Operation(mani, "merge", utils) if args.merge else None
+    op = Operation(mani, "push", utils) if not op and args.push else op
+    op = Operation(mani, "verify", utils) if not op and args.verify else op
+    if not op:
+        raise BaseException("No operation")
+    return input(f"ready to {op.fun}? (y)es, (N)o, (r)e-set: ").upper(), op, utils, mani
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-m", "--merge", help="merge project base on daily build", action="store_true")
+    parser.add_argument("-p", "--push", help="push project base on daily build", action="store_true")
+    parser.add_argument("-v", "--verify", help="verify that the daily build is merged into the new branch",
+                        action="store_true")
+    args = parser.parse_args()
+
+    while True:
+        ans, op, utils, mani = setup(args)
+        if "R" != ans:
+            break
+        elif os.path.isfile(__git_auto_merge_last_settings__):
+            os.remove(__git_auto_merge_last_settings__)
+
+    if "Y" != ans:
         return
 
+    if False:  # debug only
+        mani.proj_lst = [i for i in mani.proj_lst if i.path == "LA.QSSI.12/LINUX/android/device/qcom/qssi"]
+
+    good = False
+    for i, proj in enumerate(mani.proj_lst):
+        tag = f"[{i}/{len(mani.proj_lst)}] {proj.name}, {proj.path}, {proj.rev}"
+        op.set_tag(tag)
+        path = os.path.join(mani.working, proj.path)
+        utils.log(f"\n---> {op.fun}: {tag}")
+        status = "<ERROR>"
+        good = True
+        if os.path.isdir(path):
+            os.chdir(path)
+            g, status = op.exec(proj)
+            good = good & g
+        else:
+            good = False
+            utils.log(f"<--- {op.fun}: {status} folder not exist ({proj.path}) {tag}")
+        utils.log(f"<--- {op.fun}: {status}{tag}")
+    msg = "everything is good" if good else "something is wrong"
+    utils.log(f"\n[{msg}]", color=True)
+
 if __name__ == '__main__':
-    main(sys.argv[1:])
+    main()
