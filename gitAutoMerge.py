@@ -269,7 +269,7 @@ class Operation:
 
     def push(self, proj):
         result = self.utils.do("git status")
-        good = Utils.contain("working tree clean", result)
+        good = Utils.contain("nothing to commit, working tree clean", result)
         no_push = Utils.contain("Your branch is up to date", result)
         no_change = False
         if good and not no_push:
@@ -283,8 +283,14 @@ class Operation:
         return good, status
 
     def verify(self, proj):
-        result = self.utils.do(f"git branch --contains {proj.rev}")
-        good = Utils.contain(self.mani.code, result)
+        print(f"{self.mani.merge}, {proj.up}")
+        code = self.mani.code[self.mani.merge.index(proj.up)]
+        good = self.utils.ok(self.utils.do(f"git checkout {code}"))
+        good = self.utils.ok(self.utils.do(f"git fetch")) if good else good
+        good = self.utils.ok(self.utils.do(f"git pull")) if good else good
+        if good:
+            result = self.utils.do(f"git branch --contains {proj.rev}")
+            good = Utils.contain(code, result)
         if good:
             result = self.utils.do("git status")
             good = Utils.contain("up to date", result)
@@ -338,14 +344,13 @@ def main():
     if False:  # debug only
         mani.proj_lst = [i for i in mani.proj_lst if i.path == "LA.QSSI.12/LINUX/android/device/qcom/qssi"]
 
-    good = False
+    good = True
     for i, proj in enumerate(mani.proj_lst):
         tag = f"[{i}/{len(mani.proj_lst)}] {proj.name}, {proj.path}, {proj.rev}"
         op.set_tag(tag)
         path = os.path.join(mani.working, proj.path)
         utils.log(f"\n---> {op.fun}: {tag}")
         status = "<ERROR>"
-        good = True
         if os.path.isdir(path):
             os.chdir(path)
             g, status = op.exec(proj)
@@ -356,6 +361,7 @@ def main():
         utils.log(f"<--- {op.fun}: {status}{tag}")
     msg = "everything is good" if good else "something is wrong"
     utils.log(f"\n[{msg}]", color=True)
+
 
 if __name__ == '__main__':
     main()
